@@ -123,40 +123,29 @@ class LatentDataset(torch.utils.data.Dataset):
 
 
 class HuggingFaceDataset(torch.utils.data.Dataset):
-    """HuggingFace dataset wrapper."""
+    """HuggingFace dataset wrapper with parallel prefetching for streaming."""
 
-    def __init__(self, dataset_name: str, image_size: int = 256, split: str = "train", max_samples: int = None, streaming: bool = False):
+    def __init__(
+        self,
+        dataset_name: str,
+        image_size: int = 256,
+        split: str = "train",
+        max_samples: int = None,
+        streaming: bool = False,
+        prefetch_size: int = 256,
+        num_prefetch_workers: int = 4,
+    ):
         from datasets import load_dataset
         from torchvision import transforms
+        import threading
+        import queue
 
         print(f"Loading HuggingFace dataset: {dataset_name}...")
 
-        if streaming:
-            # Streaming mode - no download, loads on-the-fly
-            self.dataset = load_dataset(dataset_name, split=split, streaming=True)
-            self.streaming = True
-            self.max_samples = max_samples or 10000
-            print(f"Streaming mode: will use up to {self.max_samples} samples")
-        else:
-            self.dataset = load_dataset(dataset_name, split=split)
-            self.streaming = False
-            if max_samples and max_samples < len(self.dataset):
-                self.dataset = self.dataset.select(range(max_samples))
-            print(f"Loaded {len(self.dataset)} samples")
-
-        # Find image column
-        self.image_key = None
-        if self.streaming:
-            # For streaming, try common keys
-            self.image_key = 'image'
-        else:
-            for key in ['image', 'img', 'images', 'pixel_values']:
-                if key in self.dataset.column_names:
-                    self.image_key = key
-                    break
-            if self.image_key is None:
-                self.image_key = self.dataset.column_names[0]
-        print(f"Using image column: {self.image_key}")
+        self.streaming = streaming
+        self.max_samples = max_samples or 10000
+        self.prefetch_size = prefetch_size
+        self.image_key = 'image'
 
         self.transform = transforms.Compose([
             transforms.Resize(image_size),
@@ -165,10 +154,82 @@ class HuggingFaceDataset(torch.utils.data.Dataset):
             transforms.Normalize([0.5], [0.5]),  # [-1, 1]
         ])
 
-        # For streaming, pre-load iterator
-        if self.streaming:
-            self._iterator = iter(self.dataset)
+        if streaming:
+            # Streaming mode with parallel prefetching
+            self.dataset = load_dataset(dataset_name, split=split, streaming=True)
+            print(f"Streaming mode: prefetching {prefetch_size} samples with {num_prefetch_workers} workers")
+
+            # Prefetch queue and cache
             self._cache = []
+            self._cache_lock = threading.Lock()
+            self._prefetch_queue = queue.Queue(maxsize=prefetch_size * 2)
+            self._stop_prefetch = threading.Event()
+
+            # Start prefetch workers
+            self._prefetch_threads = []
+            self._iterator_lock = threading.Lock()
+            self._iterator = iter(self.dataset)
+
+            for _ in range(num_prefetch_workers):
+                t = threading.Thread(target=self._prefetch_worker, daemon=True)
+                t.start()
+                self._prefetch_threads.append(t)
+
+            # Pre-fill cache
+            self._fill_cache(min(prefetch_size, self.max_samples))
+
+        else:
+            # Non-streaming mode
+            self.dataset = load_dataset(dataset_name, split=split)
+            if max_samples and max_samples < len(self.dataset):
+                self.dataset = self.dataset.select(range(max_samples))
+            print(f"Loaded {len(self.dataset)} samples")
+
+            # Find image column
+            for key in ['image', 'img', 'images', 'pixel_values']:
+                if key in self.dataset.column_names:
+                    self.image_key = key
+                    break
+            if self.image_key is None:
+                self.image_key = self.dataset.column_names[0]
+
+        print(f"Using image column: {self.image_key}")
+
+    def _prefetch_worker(self):
+        """Worker thread that prefetches images from the stream."""
+        from PIL import Image
+
+        while not self._stop_prefetch.is_set():
+            try:
+                with self._iterator_lock:
+                    try:
+                        item = next(self._iterator)
+                    except StopIteration:
+                        self._iterator = iter(self.dataset)
+                        item = next(self._iterator)
+
+                # Process image
+                img = item[self.image_key]
+                if not hasattr(img, 'convert'):
+                    img = Image.fromarray(img)
+                img = img.convert('RGB')
+                tensor = self.transform(img)
+
+                # Add to queue (blocks if full)
+                self._prefetch_queue.put(tensor, timeout=1.0)
+
+            except Exception:
+                continue
+
+    def _fill_cache(self, n: int):
+        """Fill cache with n items from prefetch queue."""
+        while len(self._cache) < n:
+            try:
+                tensor = self._prefetch_queue.get(timeout=5.0)
+                with self._cache_lock:
+                    self._cache.append(tensor)
+            except:
+                break
 
     def __len__(self):
         if self.streaming:
@@ -177,25 +238,43 @@ class HuggingFaceDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         if self.streaming:
-            # Fill cache if needed
-            while len(self._cache) <= idx:
-                try:
-                    item = next(self._iterator)
-                    self._cache.append(item)
-                except StopIteration:
-                    # Reset iterator
-                    self._iterator = iter(self.dataset)
-                    item = next(self._iterator)
-                    self._cache.append(item)
-            img = self._cache[idx][self.image_key]
+            # Try to get from cache
+            with self._cache_lock:
+                if idx < len(self._cache):
+                    return self._cache[idx]
+
+            # Need more items - fill cache
+            self._fill_cache(idx + 1)
+
+            with self._cache_lock:
+                if idx < len(self._cache):
+                    return self._cache[idx]
+
+            # Fallback: get directly from queue
+            try:
+                tensor = self._prefetch_queue.get(timeout=10.0)
+                with self._cache_lock:
+                    self._cache.append(tensor)
+                return tensor
+            except:
+                # Return random cached item if queue empty
+                with self._cache_lock:
+                    if self._cache:
+                        return self._cache[idx % len(self._cache)]
+                raise RuntimeError("No data available")
+
         else:
             img = self.dataset[idx][self.image_key]
+            if not hasattr(img, 'convert'):
+                from PIL import Image
+                img = Image.fromarray(img)
+            img = img.convert('RGB')
+            return self.transform(img)
 
-        if not hasattr(img, 'convert'):
-            from PIL import Image
-            img = Image.fromarray(img)
-        img = img.convert('RGB')
-        return self.transform(img)
+    def __del__(self):
+        """Cleanup prefetch threads."""
+        if hasattr(self, '_stop_prefetch'):
+            self._stop_prefetch.set()
 
 
 # =============================================================================

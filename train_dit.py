@@ -125,23 +125,37 @@ class LatentDataset(torch.utils.data.Dataset):
 class HuggingFaceDataset(torch.utils.data.Dataset):
     """HuggingFace dataset wrapper."""
 
-    def __init__(self, dataset_name: str, image_size: int = 256, split: str = "train"):
+    def __init__(self, dataset_name: str, image_size: int = 256, split: str = "train", max_samples: int = None, streaming: bool = False):
         from datasets import load_dataset
         from torchvision import transforms
 
         print(f"Loading HuggingFace dataset: {dataset_name}...")
-        self.dataset = load_dataset(dataset_name, split=split)
-        print(f"Loaded {len(self.dataset)} samples")
+
+        if streaming:
+            # Streaming mode - no download, loads on-the-fly
+            self.dataset = load_dataset(dataset_name, split=split, streaming=True)
+            self.streaming = True
+            self.max_samples = max_samples or 10000
+            print(f"Streaming mode: will use up to {self.max_samples} samples")
+        else:
+            self.dataset = load_dataset(dataset_name, split=split)
+            self.streaming = False
+            if max_samples and max_samples < len(self.dataset):
+                self.dataset = self.dataset.select(range(max_samples))
+            print(f"Loaded {len(self.dataset)} samples")
 
         # Find image column
         self.image_key = None
-        for key in ['image', 'img', 'images', 'pixel_values']:
-            if key in self.dataset.column_names:
-                self.image_key = key
-                break
-        if self.image_key is None:
-            # Use first column that looks like images
-            self.image_key = self.dataset.column_names[0]
+        if self.streaming:
+            # For streaming, try common keys
+            self.image_key = 'image'
+        else:
+            for key in ['image', 'img', 'images', 'pixel_values']:
+                if key in self.dataset.column_names:
+                    self.image_key = key
+                    break
+            if self.image_key is None:
+                self.image_key = self.dataset.column_names[0]
         print(f"Using image column: {self.image_key}")
 
         self.transform = transforms.Compose([
@@ -151,11 +165,32 @@ class HuggingFaceDataset(torch.utils.data.Dataset):
             transforms.Normalize([0.5], [0.5]),  # [-1, 1]
         ])
 
+        # For streaming, pre-load iterator
+        if self.streaming:
+            self._iterator = iter(self.dataset)
+            self._cache = []
+
     def __len__(self):
+        if self.streaming:
+            return self.max_samples
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        img = self.dataset[idx][self.image_key]
+        if self.streaming:
+            # Fill cache if needed
+            while len(self._cache) <= idx:
+                try:
+                    item = next(self._iterator)
+                    self._cache.append(item)
+                except StopIteration:
+                    # Reset iterator
+                    self._iterator = iter(self.dataset)
+                    item = next(self._iterator)
+                    self._cache.append(item)
+            img = self._cache[idx][self.image_key]
+        else:
+            img = self.dataset[idx][self.image_key]
+
         if not hasattr(img, 'convert'):
             from PIL import Image
             img = Image.fromarray(img)
@@ -202,7 +237,12 @@ def train(args):
     # Dataset
     if args.dataset:
         print(f"\nLoading HuggingFace dataset: {args.dataset}...")
-        dataset = HuggingFaceDataset(args.dataset, image_size=256)
+        dataset = HuggingFaceDataset(
+            args.dataset,
+            image_size=256,
+            max_samples=args.max_samples,
+            streaming=args.streaming,
+        )
     elif args.use_latents:
         print(f"\nLoading latents from {args.data_dir}...")
         dataset = LatentDataset(args.data_dir)
@@ -355,6 +395,10 @@ def main():
                         help='Use pre-encoded latents')
     parser.add_argument('--vae_path', type=str, default=None,
                         help='Path to VAE weights (safetensors)')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='Max samples to use from dataset')
+    parser.add_argument('--streaming', action='store_true',
+                        help='Stream dataset (no download)')
 
     # Training
     parser.add_argument('--batch_size', type=int, default=16)

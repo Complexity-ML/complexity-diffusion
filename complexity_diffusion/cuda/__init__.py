@@ -1,5 +1,10 @@
 """
-CUDA/Triton kernels for Complexity Diffusion (optional).
+CUDA/Triton kernels for Complexity Diffusion.
+
+Provides accelerated implementations of:
+- INL Dynamics (fused controller + dynamics equations)
+- RMSNorm (fused normalization)
+- Flash Attention (memory-efficient attention)
 """
 
 HAS_TRITON = False
@@ -10,4 +15,35 @@ try:
 except ImportError:
     pass
 
-__all__ = ["HAS_TRITON"]
+# Import accelerated functions
+from .triton_dynamics import (
+    inl_dynamics,
+    triton_inl_dynamics,
+    pytorch_inl_dynamics,
+)
+from .triton_norm import (
+    rms_norm,
+    triton_rms_norm,
+    pytorch_rms_norm,
+)
+from .triton_attention import (
+    attention,
+    triton_flash_attention,
+    pytorch_attention,
+)
+
+__all__ = [
+    "HAS_TRITON",
+    # Dynamics
+    "inl_dynamics",
+    "triton_inl_dynamics",
+    "pytorch_inl_dynamics",
+    # Normalization
+    "rms_norm",
+    "triton_rms_norm",
+    "pytorch_rms_norm",
+    # Attention
+    "attention",
+    "triton_flash_attention",
+    "pytorch_attention",
+]

@@ -7,12 +7,20 @@ Full dynamics equations (like a physical system):
     h_next = h + dt * gate * v_next     # position update (integration)
 
 This creates smooth, stable trajectories like a robot controller.
+Supports Triton acceleration when available.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
+
+# Try to import Triton-accelerated version
+try:
+    from ..cuda.triton_dynamics import inl_dynamics as triton_dynamics_fn
+    HAS_TRITON_DYNAMICS = True
+except ImportError:
+    HAS_TRITON_DYNAMICS = False
 
 
 class INLDynamics(nn.Module):
@@ -24,6 +32,7 @@ class INLDynamics(nn.Module):
         - Stable convergence (PID-like control)
         - Learnable dynamics per dimension
         - Real-time capable
+        - Triton-accelerated when available
     """
 
     def __init__(
@@ -34,10 +43,12 @@ class INLDynamics(nn.Module):
         init_gate: float = 0.5,       # medium amplitude
         dt: float = 0.1,              # integration timestep
         controller_hidden: int = 64,  # controller MLP size
+        use_triton: bool = True,      # use Triton when available
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.dt = dt
+        self.use_triton = use_triton and HAS_TRITON_DYNAMICS
 
         # Learnable equilibrium (target position)
         self.mu = nn.Parameter(torch.zeros(hidden_size))
@@ -95,10 +106,16 @@ class INLDynamics(nn.Module):
         beta = F.softplus(beta_raw)           # [0, inf) - correction
         gate = torch.sigmoid(gate_raw)        # [0, 1] - amplitude
 
-        # Dynamics equations
-        error = h - self.mu                           # deviation from equilibrium
-        v_next = alpha * v - beta * error             # velocity update
-        h_next = h + self.dt * gate * v_next          # position update
+        # Use Triton-accelerated dynamics if available
+        if self.use_triton and h.is_cuda:
+            h_next, v_next = triton_dynamics_fn(
+                h, v, self.mu, alpha, beta, gate, self.dt
+            )
+        else:
+            # PyTorch fallback
+            error = h - self.mu                           # deviation from equilibrium
+            v_next = alpha * v - beta * error             # velocity update
+            h_next = h + self.dt * gate * v_next          # position update
 
         return h_next, v_next
 

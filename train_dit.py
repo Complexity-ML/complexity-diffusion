@@ -2,8 +2,14 @@
 Train Complexity DiT - Minimal setup for image generation.
 
 Usage:
-    python train_dit.py --config S --batch_size 16 --steps 100000
-    python train_dit.py --config B --batch_size 8 --steps 200000
+    # With HuggingFace dataset (recommended)
+    python train_dit.py --dataset huggan/wikiart --batch_size 16 --steps 100000
+
+    # With local images
+    python train_dit.py --data_dir /path/to/images --batch_size 16 --steps 100000
+
+    # With pre-encoded latents (fastest)
+    python train_dit.py --data_dir /path/to/latents --use_latents --batch_size 32
 """
 
 import torch
@@ -116,6 +122,47 @@ class LatentDataset(torch.utils.data.Dataset):
         return torch.load(self.files[idx])
 
 
+class HuggingFaceDataset(torch.utils.data.Dataset):
+    """HuggingFace dataset wrapper."""
+
+    def __init__(self, dataset_name: str, image_size: int = 256, split: str = "train"):
+        from datasets import load_dataset
+        from torchvision import transforms
+
+        print(f"Loading HuggingFace dataset: {dataset_name}...")
+        self.dataset = load_dataset(dataset_name, split=split)
+        print(f"Loaded {len(self.dataset)} samples")
+
+        # Find image column
+        self.image_key = None
+        for key in ['image', 'img', 'images', 'pixel_values']:
+            if key in self.dataset.column_names:
+                self.image_key = key
+                break
+        if self.image_key is None:
+            # Use first column that looks like images
+            self.image_key = self.dataset.column_names[0]
+        print(f"Using image column: {self.image_key}")
+
+        self.transform = transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),  # [-1, 1]
+        ])
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img = self.dataset[idx][self.image_key]
+        if not hasattr(img, 'convert'):
+            from PIL import Image
+            img = Image.fromarray(img)
+        img = img.convert('RGB')
+        return self.transform(img)
+
+
 # =============================================================================
 # TRAINING
 # =============================================================================
@@ -153,10 +200,14 @@ def train(args):
         p.requires_grad = False
 
     # Dataset
-    print(f"\nLoading dataset from {args.data_dir}...")
-    if args.use_latents:
+    if args.dataset:
+        print(f"\nLoading HuggingFace dataset: {args.dataset}...")
+        dataset = HuggingFaceDataset(args.dataset, image_size=256)
+    elif args.use_latents:
+        print(f"\nLoading latents from {args.data_dir}...")
         dataset = LatentDataset(args.data_dir)
     else:
+        print(f"\nLoading images from {args.data_dir}...")
         dataset = ImageFolderDataset(args.data_dir, image_size=256)
 
     dataloader = DataLoader(
@@ -296,7 +347,9 @@ def main():
                         help='Context embedding dimension')
 
     # Data
-    parser.add_argument('--data_dir', type=str, required=True,
+    parser.add_argument('--dataset', type=str, default=None,
+                        help='HuggingFace dataset name (e.g., huggan/wikiart)')
+    parser.add_argument('--data_dir', type=str, default=None,
                         help='Path to image folder or latent folder')
     parser.add_argument('--use_latents', action='store_true',
                         help='Use pre-encoded latents')

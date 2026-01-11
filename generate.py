@@ -91,8 +91,9 @@ def generate(
     # Start from noise
     latents = torch.randn(num_samples, 4, 32, 32, device=device)
 
-    # Dummy context (unconditional)
-    context = torch.zeros(num_samples, 77, model.d_model, device=device)
+    # Dummy context (unconditional) - use context_dim from model
+    context_dim = model.context_dim if hasattr(model, 'context_dim') else 768
+    context = torch.zeros(num_samples, 77, context_dim, device=device)
 
     # DDIM-like sampling with fewer steps
     step_ratio = sampler.num_steps // num_steps
@@ -156,9 +157,15 @@ def main():
     print(f"Loading model from {args.checkpoint}...")
     model = ComplexityDiT.from_config(args.config, context_dim=args.context_dim).to(device)
 
-    checkpoint = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"Loaded checkpoint from step {checkpoint['step']}")
+    if args.checkpoint.endswith('.safetensors'):
+        from safetensors.torch import load_file
+        state_dict = load_file(args.checkpoint)
+        model.load_state_dict(state_dict)
+        print("Loaded safetensors checkpoint")
+    else:
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded checkpoint from step {checkpoint['step']}")
 
     # Load VAE
     print("Loading VAE...")

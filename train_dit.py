@@ -303,9 +303,6 @@ def train(args):
     global_step = 0
     losses = []
 
-    # Dummy context (unconditional for now)
-    dummy_context = torch.zeros(args.batch_size, 77, args.context_dim, device=device)
-
     pbar = tqdm(total=args.steps, desc="Training")
 
     while global_step < args.steps:
@@ -321,9 +318,13 @@ def train(args):
                 with torch.no_grad():
                     latents = vae.encode(images, sample=True)
 
+            # Create dummy context matching actual batch size
+            actual_batch_size = latents.shape[0]
+            dummy_context = torch.zeros(actual_batch_size, 77, args.context_dim, device=device)
+
             # Sample noise and timesteps
             noise = torch.randn_like(latents)
-            timesteps = torch.randint(0, 1000, (latents.shape[0],), device=device)
+            timesteps = torch.randint(0, 1000, (actual_batch_size,), device=device)
 
             # Add noise
             noisy_latents = scheduler.add_noise(latents, noise, timesteps)

@@ -11,7 +11,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="complexity-diffusion",
-    version="0.1.0",
+    version="0.1.2",
     description="Llama architecture DiT with INL Dynamics for image generation",
     long_description=long_description,
     long_description_content_type="text/markdown",

@@ -103,7 +103,10 @@ class INLDynamics(nn.Module):
             controller_out, self.hidden_size, dim=-1
         )
         alpha = torch.sigmoid(alpha_raw)      # [0, 1] - inertia
-        beta = F.softplus(beta_raw)           # [0, inf) - correction
+        # CRITICAL FIX: Clamp beta to prevent explosion!
+        # softplus can go to infinity, causing NaN after long training
+        # Max beta=2.0 keeps dynamics stable (like a real PID controller)
+        beta = torch.clamp(F.softplus(beta_raw), max=2.0)  # [0, 2] - correction
         gate = torch.sigmoid(gate_raw)        # [0, 1] - amplitude
 
         # Use Triton-accelerated dynamics if available
@@ -111,10 +114,14 @@ class INLDynamics(nn.Module):
             h_next, v_next = triton_dynamics_fn(
                 h, v, self.mu, alpha, beta, gate, self.dt
             )
+            # STABILITY: Clamp velocity to prevent runaway accumulation
+            v_next = torch.clamp(v_next, min=-10.0, max=10.0)
         else:
             # PyTorch fallback
             error = h - self.mu                           # deviation from equilibrium
             v_next = alpha * v - beta * error             # velocity update
+            # STABILITY: Clamp velocity to prevent runaway accumulation
+            v_next = torch.clamp(v_next, min=-10.0, max=10.0)
             h_next = h + self.dt * gate * v_next          # position update
 
         return h_next, v_next

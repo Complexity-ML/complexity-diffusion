@@ -1,7 +1,7 @@
 """
-Complexity Diffusion - Llama Architecture for Image Generation
+Complexity Diffusion - Mu-Guided Architecture for Image Generation
 
-Multicouche robotics architecture with INL Dynamics for diffusion models.
+v0.3.0: Mu-Guided KQV, Mu-Guided Expert Routing, Contextual Mu, Mu-Damped Dynamics
 """
 
 from setuptools import setup, find_packages
@@ -11,8 +11,8 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="complexity-diffusion",
-    version="0.1.2",
-    description="Llama architecture DiT with INL Dynamics for image generation",
+    version="0.3.0",
+    description="Mu-Guided DiT with INL Dynamics for image generation",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Pacific Prime",

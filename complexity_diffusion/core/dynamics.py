@@ -1,10 +1,14 @@
 """
 INL Dynamics - Robotics-grade control with velocity tracking.
 
+v0.3.0: Contextual Mu via mu_proj (INL 2025)
+v0.3.0: Returns mu_contextual for next layer guidance
+
 Full dynamics equations (like a physical system):
     error = h - mu                      # deviation from equilibrium
     v_next = alpha * v - beta * error   # velocity update (momentum + correction)
     h_next = h + dt * gate * v_next     # position update (integration)
+    mu_contextual = mu + mu_proj(h)     # contextual mu for next layer
 
 This creates smooth, stable trajectories like a robot controller.
 Supports Triton acceleration when available.
@@ -53,6 +57,11 @@ class INLDynamics(nn.Module):
         # Learnable equilibrium (target position)
         self.mu = nn.Parameter(torch.zeros(hidden_size))
 
+        # v0.3.0: Contextual mu projection (INL 2025)
+        # mu_contextual = mu + mu_proj(h) - allows mu to adapt based on input
+        self.mu_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        nn.init.zeros_(self.mu_proj.weight)  # Start neutral (just mu)
+
         # Controller MLP - computes alpha, beta, gate from context
         # Input: [h, v] concatenated
         self.controller = nn.Sequential(
@@ -78,17 +87,20 @@ class INLDynamics(nn.Module):
         self,
         h: torch.Tensor,
         v: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return_mu: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Apply dynamics update.
 
         Args:
             h: Hidden states [batch, seq_len, hidden_size]
             v: Velocity states [batch, seq_len, hidden_size] (None = init to zero)
+            return_mu: Whether to return contextual mu for next layer guidance
 
         Returns:
             h_next: Updated hidden states
             v_next: Updated velocity states
+            mu_contextual: (if return_mu=True) Contextual mu for next layer
         """
         # Initialize velocity if not provided
         if v is None:
@@ -124,7 +136,12 @@ class INLDynamics(nn.Module):
             v_next = torch.clamp(v_next, min=-10.0, max=10.0)
             h_next = h + self.dt * gate * v_next          # position update
 
-        return h_next, v_next
+        # v0.3.0: Contextual mu for next layer guidance (INL 2025)
+        mu_contextual = None
+        if return_mu:
+            mu_contextual = self.mu + self.mu_proj(h)
+
+        return h_next, v_next, mu_contextual
 
     def init_velocity(self, batch_size: int, seq_len: int, device: torch.device) -> torch.Tensor:
         """Initialize velocity to zero."""

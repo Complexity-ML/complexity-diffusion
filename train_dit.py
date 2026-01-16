@@ -1,9 +1,15 @@
 """
-Train Complexity DiT - Minimal setup for image generation.
+Train Complexity DiT v0.3.0 - Mu-Guided Architecture for image generation.
+
+v0.3.0 Features:
+    - Mu-Guided KQV Attention (μ biases K, Q, V)
+    - Mu-Guided Expert Routing (μ influences expert selection)
+    - Contextual Mu (μ adapts based on hidden state)
+    - Mu-Damped Dynamics (top-down guidance reduces oscillations)
 
 Usage:
     # With HuggingFace dataset (recommended)
-    python train_dit.py --dataset huggan/wikiart --batch_size 16 --steps 100000
+    python train_dit.py --dataset huggan/wikiart --batch_size 16 --steps 100000 --bf16
 
     # With local images
     python train_dit.py --data_dir /path/to/images --batch_size 16 --steps 100000
@@ -291,8 +297,20 @@ def train(args):
         weight_decay=0.01,
     )
 
-    # Mixed precision
-    scaler = torch.amp.GradScaler('cuda') if args.mixed_precision and device.type == 'cuda' else None
+    # Mixed precision (bf16 or fp16)
+    if args.bf16 and device.type == 'cuda':
+        # BF16 doesn't need GradScaler
+        dtype = torch.bfloat16
+        scaler = None
+        print("Using BF16 precision")
+    elif args.mixed_precision and device.type == 'cuda':
+        dtype = torch.float16
+        scaler = torch.amp.GradScaler('cuda')
+        print("Using FP16 precision with GradScaler")
+    else:
+        dtype = torch.float32
+        scaler = None
+        print("Using FP32 precision")
 
     # Training loop
     print(f"\nStarting training for {args.steps} steps...")
@@ -329,8 +347,9 @@ def train(args):
             # Add noise
             noisy_latents = scheduler.add_noise(latents, noise, timesteps)
 
-            # Forward
-            with torch.amp.autocast('cuda', enabled=args.mixed_precision and device.type == 'cuda'):
+            # Forward with autocast (bf16 or fp16)
+            autocast_enabled = (args.bf16 or args.mixed_precision) and device.type == 'cuda'
+            with torch.amp.autocast('cuda', enabled=autocast_enabled, dtype=dtype if autocast_enabled else None):
                 noise_pred = model(noisy_latents, timesteps, dummy_context)
                 loss = F.mse_loss(noise_pred, noise)
 
@@ -426,7 +445,10 @@ def main():
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--steps', type=int, default=100000)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--mixed_precision', action='store_true', default=True)
+    parser.add_argument('--mixed_precision', action='store_true', default=True,
+                        help='Use FP16 mixed precision')
+    parser.add_argument('--bf16', action='store_true',
+                        help='Use BF16 precision (recommended for H100)')
     parser.add_argument('--num_workers', type=int, default=4)
 
     # Output

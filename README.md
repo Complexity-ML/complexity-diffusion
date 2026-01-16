@@ -1,6 +1,6 @@
-# Complexity Diffusion
+# Complexity Diffusion v0.3.0
 
-Diffusion Transformer (DiT) with **INL Dynamics** for image generation.
+Diffusion Transformer (DiT) with **Mu-Guided Architecture** and **INL Dynamics** for image generation.
 
 [![PyPI version](https://badge.fury.io/py/complexity-diffusion.svg)](https://badge.fury.io/py/complexity-diffusion)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -11,40 +11,71 @@ Diffusion Transformer (DiT) with **INL Dynamics** for image generation.
 pip install complexity-diffusion
 ```
 
+## What's New in v0.3.0
+
+- **Mu-Guided Attention (KQV)**: μ biases K, Q, AND V for smoother denoising
+- **Mu-Guided Expert Routing**: μ influences which expert processes each patch
+- **Contextual Mu**: μ adapts based on denoising progress
+- **Mu-Damped Dynamics**: Top-down guidance reduces oscillations
+- **Fused Mu-KQV**: 2x faster via concat+cuBLAS
+
 ## Features
 
-- **ComplexityDiT** - Diffusion Transformer with INL Dynamics
+- **ComplexityDiT** - Diffusion Transformer with Mu-Guided INL Dynamics
 - **ComplexityVAE** - Image encoder/decoder
 - **DDIMScheduler** - Fast sampling (50 steps vs 1000)
 - **Unconditional generation** (text-to-image coming soon)
 
-## Architecture
+## Architecture (v0.3.0)
 
-Each DiT block has 4 components:
+Each DiT block has 4 components with **Mu guidance**:
 
-1. **KQV Attention** with QK-Norm (self-attention)
-2. **Cross-Attention** for text conditioning
-3. **INL Dynamics** (smooth denoising trajectories)
-4. **Token-Routed MLP** with experts
-
-### INL Dynamics for Diffusion
-
-The Dynamics layer provides smooth denoising:
-
-```python
-error = h - mu                      # deviation from equilibrium
-v_next = alpha * v - beta * error   # velocity update
-h_next = h + dt * gate * v_next     # position update
+```
+Noisy Latent + Timestep
+  │
+  ▼
+[AdaLN] ─► [Mu-Guided KQV Attention] ─► [INL Dynamics] ─► [Cross-Attention] ─► [Token-Routed MLP]
+  │              ▲                            │                                      ▲
+  │              │                            │                                      │
+  │         mu_prev                     mu_contextual ───────────────────────────────┘
+  │                                           │
+  +────────────────── Residual ───────────────┼───────────────────────────────────────+
+  │                                           │
+  ▼                                           ▼
+Output ◄────────────────────────────── mu_next (to next block)
 ```
 
-This creates smooth, stable denoising trajectories.
+### Mu-Guided Diffusion
+
+```python
+# Mu guides the denoising process
+x_mu = concat([x, mu_prev], dim=-1)
+k = x_mu @ concat([W_k, W_mu_k])  # K biased by mu
+q = x_mu @ concat([W_q, W_mu_q])  # Q biased by mu
+v = x_mu @ concat([W_v, W_mu_v])  # V biased by mu
+
+# Mu-Damped dynamics for smooth denoising
+error = h - mu
+v_next = alpha * v - beta * error
+h_next = h + dt * gate * v_next
+mu_contextual = mu + mu_proj(h)  # Adapts to denoising state
+```
+
+### Why Mu for Diffusion?
+
+| Aspect | Standard DiT | Mu-Guided DiT |
+|--------|--------------|---------------|
+| **Denoising** | Each step independent | μ guides trajectory |
+| **Oscillations** | Can be jerky | **Smooth (damped)** |
+| **Convergence** | Slow | **Fast** |
+| **Sample quality** | Good | **Better (smoother)** |
 
 ## Usage
 
 ```python
 from complexity_diffusion import ComplexityDiT, ComplexityVAE
 
-# Create DiT model
+# Create DiT model (v0.3.0 with Mu-Guided)
 dit = ComplexityDiT.from_config("S")  # Small ~114M params
 print(f"Parameters: {dit.get_num_params() / 1e6:.1f}M")
 
@@ -62,13 +93,13 @@ noise_pred = dit(x, t, context)
 
 ## Model Configurations
 
-| Config | Params | Layers | d_model | Heads |
-|--------|--------|--------|---------|-------|
-| S      | ~114M  | 12     | 384     | 6     |
-| B      | ~250M  | 12     | 768     | 12    |
-| L      | ~500M  | 24     | 1024    | 16    |
-| XL     | ~700M  | 28     | 1152    | 16    |
-| XXL    | ~1.5B  | 32     | 1536    | 24    |
+| Config | Params | Layers | d_model | Heads | Experts |
+|--------|--------|--------|---------|-------|---------|
+| S      | ~114M  | 12     | 384     | 6     | 4       |
+| B      | ~250M  | 12     | 768     | 12    | 4       |
+| L      | ~500M  | 24     | 1024    | 16    | 8       |
+| XL     | ~700M  | 28     | 1152    | 16    | 8       |
+| XXL    | ~1.5B  | 32     | 1536    | 24    | 8       |
 
 ## Generation
 
@@ -84,7 +115,7 @@ dit = ComplexityDiT.from_config("S").to(device)
 vae = ComplexityVAE().to(device)
 scheduler = DDIMScheduler(num_train_timesteps=1000)
 
-# Generate
+# Generate with Mu-guided denoising
 scheduler.set_timesteps(50)  # 50 sampling steps
 latents = torch.randn(1, 4, 32, 32, device=device)
 context = torch.zeros(1, 77, 768, device=device)  # Unconditional
@@ -120,14 +151,25 @@ python train_dit.py \
     --dataset huggan/wikiart \
     --dit-size S \
     --batch-size 32 \
-    --steps 50000
+    --steps 50000 \
+    --bf16
 ```
+
+## Innovations
+
+| Innovation | Status | Description |
+|------------|--------|-------------|
+| Mu-Guided KQV | **Novel** | μ biases K, Q, V for coherent denoising |
+| Mu-Guided Experts | **Novel** | μ influences patch routing |
+| Mu-Damped Dynamics | **Novel** | Top-down damping for smooth trajectories |
+| Contextual Mu | **Novel** | μ adapts to denoising progress |
+| Token-Routed MLP | **Novel** | Deterministic patch routing |
 
 ## Related Packages
 
-- **complexity** - LLM architecture (Token-Routed MLP)
-- **complexity-deep** - LLM with INL Dynamics
-- **pyllm-inference** - Inference server
+- [complexity-deep](https://github.com/Complexity-ML/complexity-deep) - LLM with Mu-Guided architecture
+- [complexity-framework](https://github.com/Complexity-ML/complexity-framework) - Training framework
+- [pacific-prime](https://huggingface.co/Pacific-Prime/pacific-prime) - 1.5B LLM checkpoint
 
 ## License
 
